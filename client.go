@@ -27,6 +27,7 @@ type ServiceEntry struct {
 	Port         int
 	Info         string
 	InfoFields   []string
+	SrcIP       net.IP
 
 	Addr net.IP // @Deprecated
 
@@ -36,7 +37,8 @@ type ServiceEntry struct {
 
 // complete is used to check if we have all the info we need
 func (s *ServiceEntry) complete() bool {
-	return (s.AddrV4 != nil || s.AddrV6 != nil || s.Addr != nil) && s.Port != 0 && s.hasTXT
+	return true
+	// return (s.AddrV4 != nil || s.AddrV6 != nil || s.Addr != nil) && s.Port != 0 && s.hasTXT
 }
 
 // QueryParam is used to customize how a Lookup is performed
@@ -159,7 +161,7 @@ func newClient(v4 bool, v6 bool, logger *log.Logger) (*client, error) {
 
 	// Establish unicast connections
 	if v4 {
-		uconn4, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		uconn4, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 5353})
 		if err != nil {
 			logger.Printf("[ERR] mdns: Failed to bind to udp4 port: %v", err)
 		}
@@ -198,12 +200,6 @@ func newClient(v4 bool, v6 bool, logger *log.Logger) (*client, error) {
 		uconn4 = nil
 		mconn4 = nil
 		v4 = false
-	}
-	if uconn6 == nil || mconn6 == nil {
-		logger.Printf("[INFO] mdns: Failed to listen to both unicast and multicast on IPv6")
-		uconn6 = nil
-		mconn6 = nil
-		v6 = false
 	}
 	if !v4 && !v6 {
 		return nil, fmt.Errorf("at least one of IPv4 and IPv6 must be enabled for querying")
@@ -372,6 +368,8 @@ func (c *client) query(params *QueryParam) error {
 			if inp == nil {
 				continue
 			}
+			inp.SrcIP = resp.src.IP
+
 
 			// Check if this entry is complete
 			if inp.complete() {
