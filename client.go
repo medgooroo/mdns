@@ -161,7 +161,7 @@ func newClient(v4 bool, v6 bool, logger *log.Logger) (*client, error) {
 
 	// Establish unicast connections
 	if v4 {
-		uconn4, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 5353})
+		uconn4, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353})
 		if err != nil {
 			logger.Printf("[ERR] mdns: Failed to bind to udp4 port: %v", err)
 		}
