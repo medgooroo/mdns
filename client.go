@@ -27,7 +27,7 @@ type ServiceEntry struct {
 	Port         int
 	Info         string
 	InfoFields   []string
-	SrcIP       net.IP
+	SrcIP        net.IP
 
 	Addr net.IP // @Deprecated
 
@@ -71,8 +71,8 @@ func DefaultParams(service string) *QueryParam {
 // for a timeout before finishing the query. The results are streamed
 // to a channel. Sends will not block, so clients should make sure to
 // either read or buffer.
-func Query(params *QueryParam) error {
-	return QueryContext(context.Background(), params)
+func Query(params *[]QueryParam, respChan chan<- *ServiceEntry, queryClient *Client) error {
+	return QueryContext(context.Background(), params, respChan, queryClient)
 }
 
 // QueryContext looks up a given service, in a domain, waiting at most
@@ -80,55 +80,31 @@ func Query(params *QueryParam) error {
 // to a channel. Sends will not block, so clients should make sure to
 // either read or buffer. QueryContext will attempt to stop the query
 // on cancellation.
-func QueryContext(ctx context.Context, params *QueryParam) error {
-	if params.Logger == nil {
-		params.Logger = log.Default()
-	}
-	// Create a new client
-	client, err := newClient(!params.DisableIPv4, !params.DisableIPv6, params.Logger)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			client.Close()
-		case <-client.closedCh:
-			return
+func QueryContext(ctx context.Context, params *[]QueryParam, respChan chan<- *ServiceEntry, queryClient *Client) error {
+	for _, par := range *params {
+		if par.Domain == "" {
+			par.Domain = "local"
 		}
-	}()
-
-	// Set the multicast interface
-	if params.Interface != nil {
-		if err := client.setInterface(params.Interface); err != nil {
-			return err
+		if par.Timeout == 0 {
+			par.Timeout = time.Second
 		}
 	}
-
 	// Ensure defaults are set
-	if params.Domain == "" {
-		params.Domain = "local"
-	}
-	if params.Timeout == 0 {
-		params.Timeout = time.Second
-	}
 
 	// Run the query
-	return client.query(params)
+	return queryClient.query(params, respChan)
 }
 
 // Lookup is the same as Query, however it uses all the default parameters
-func Lookup(service string, entries chan<- *ServiceEntry) error {
-	params := DefaultParams(service)
-	params.Entries = entries
-	return Query(params)
-}
+//func Lookup(service string, entries chan<- *ServiceEntry) error {
+//	params := DefaultParams(service)
+//	params.Entries = entries
+//	return Query(params, []QueryParam{})
+//}
 
 // Client provides a query interface that can be used to
 // search for service providers using mDNS
-type client struct {
+type Client struct {
 	use_ipv4 bool
 	use_ipv6 bool
 
@@ -142,11 +118,15 @@ type client struct {
 	closedCh chan struct{} // TODO(reddaly): This doesn't appear to be used.
 
 	log *log.Logger
+
+	MsgChan chan *msgAddr
 }
 
-// NewClient creates a new mdns Client that can be used to query
+func NewClient(v4 bool, v6 bool, logger *log.Logger, inter *net.Interface) (*Client, error) {
+	return newClient(v4, v6, logger, inter)
+} // NewClient creates a new mdns Client that can be used to query
 // for records
-func newClient(v4 bool, v6 bool, logger *log.Logger) (*client, error) {
+func newClient(v4 bool, v6 bool, logger *log.Logger, inter *net.Interface) (*Client, error) {
 	if !v4 && !v6 {
 		return nil, fmt.Errorf("Must enable at least one of IPv4 and IPv6 querying")
 	}
@@ -205,7 +185,7 @@ func newClient(v4 bool, v6 bool, logger *log.Logger) (*client, error) {
 		return nil, fmt.Errorf("at least one of IPv4 and IPv6 must be enabled for querying")
 	}
 
-	c := &client{
+	c := &Client{
 		use_ipv4:          v4,
 		use_ipv6:          v6,
 		ipv4MulticastConn: mconn4,
@@ -215,17 +195,24 @@ func newClient(v4 bool, v6 bool, logger *log.Logger) (*client, error) {
 		closedCh:          make(chan struct{}),
 		log:               logger,
 	}
+	c.MsgChan = make(chan *msgAddr, 32)
+	err = c.SetInterface(inter)
+	if err != nil {
+		return c, err
+	}
+	go c.recv(c.ipv4UnicastConn, c.MsgChan)
+	go c.recv(c.ipv4MulticastConn, c.MsgChan)
 	return c, nil
 }
 
-// Close is used to cleanup the client
-func (c *client) Close() error {
+// Close is used to cleanup the Client
+func (c *Client) Close() error {
 	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
 		// something else already closed it
 		return nil
 	}
 
-	c.log.Printf("[INFO] mdns: Closing client %v", *c)
+	c.log.Printf("[INFO] mdns: Closing Client %v", *c)
 	close(c.closedCh)
 
 	if c.ipv4UnicastConn != nil {
@@ -246,7 +233,7 @@ func (c *client) Close() error {
 
 // setInterface is used to set the query interface, uses system
 // default if not provided
-func (c *client) setInterface(iface *net.Interface) error {
+func (c *Client) SetInterface(iface *net.Interface) error {
 	if c.use_ipv4 {
 		p := ipv4.NewPacketConn(c.ipv4UnicastConn)
 		if err := p.SetMulticastInterface(iface); err != nil {
@@ -277,46 +264,35 @@ type msgAddr struct {
 }
 
 // query is used to perform a lookup and stream results
-func (c *client) query(params *QueryParam) error {
-	// Create the service name
-	serviceAddr := fmt.Sprintf("%s.%s.", trimDot(params.Service), trimDot(params.Domain))
-
-	// Start listening for response packets
-	msgCh := make(chan *msgAddr, 32)
-	if c.use_ipv4 {
-		go c.recv(c.ipv4UnicastConn, msgCh)
-		go c.recv(c.ipv4MulticastConn, msgCh)
-	}
-	if c.use_ipv6 {
-		go c.recv(c.ipv6UnicastConn, msgCh)
-		go c.recv(c.ipv6MulticastConn, msgCh)
-	}
-
+func (c *Client) query(params *[]QueryParam, respChan chan<- *ServiceEntry) error {
 	// Send the query
-	m := new(dns.Msg)
-	m.SetQuestion(serviceAddr, dns.TypePTR)
-	// RFC 6762, section 18.12.  Repurposing of Top Bit of qclass in Question
-	// Section
-	//
-	// In the Question Section of a Multicast DNS query, the top bit of the qclass
-	// field is used to indicate that unicast responses are preferred for this
-	// particular question.  (See Section 5.4.)
-	if params.WantUnicastResponse {
-		m.Question[0].Qclass |= 1 << 15
-	}
-	m.RecursionDesired = false
-	if err := c.sendQuery(m); err != nil {
-		return err
+	for _, par := range *params {
+		m := new(dns.Msg)
+		serviceAddr := fmt.Sprintf("%s.%s.", trimDot(par.Service), trimDot(par.Domain))
+		m.SetQuestion(serviceAddr, dns.TypePTR)
+		// RFC 6762, section 18.12.  Repurposing of Top Bit of qclass in Question
+		// Section
+		//
+		// In the Question Section of a Multicast DNS query, the top bit of the qclass
+		// field is used to indicate that unicast responses are preferred for this
+		// particular question.  (See Section 5.4.)
+		if par.WantUnicastResponse {
+			m.Question[0].Qclass |= 1 << 15
+		}
+		m.RecursionDesired = false
+		if err := c.sendQuery(m); err != nil {
+			return err
+		}
 	}
 
 	// Map the in-progress responses
 	inprogress := make(map[string]*ServiceEntry)
 
 	// Listen until we reach the timeout
-	finish := time.After(params.Timeout)
+	finish := time.After(2 * time.Second)
 	for {
 		select {
-		case resp := <-msgCh:
+		case resp := <-c.MsgChan:
 			var inp *ServiceEntry
 			for _, answer := range append(resp.msg.Answer, resp.msg.Extra...) {
 				// TODO(reddaly): Check that response corresponds to serviceAddr?
@@ -370,7 +346,6 @@ func (c *client) query(params *QueryParam) error {
 			}
 			inp.SrcIP = resp.src.IP
 
-
 			// Check if this entry is complete
 			if inp.complete() {
 				if inp.sent {
@@ -378,7 +353,7 @@ func (c *client) query(params *QueryParam) error {
 				}
 				inp.sent = true
 				select {
-				case params.Entries <- inp:
+				case respChan <- inp:
 				default:
 				}
 			} else {
@@ -397,7 +372,7 @@ func (c *client) query(params *QueryParam) error {
 }
 
 // sendQuery is used to multicast a query out
-func (c *client) sendQuery(q *dns.Msg) error {
+func (c *Client) sendQuery(q *dns.Msg) error {
 	buf, err := q.Pack()
 	if err != nil {
 		return err
@@ -418,13 +393,16 @@ func (c *client) sendQuery(q *dns.Msg) error {
 }
 
 // recv is used to receive until we get a shutdown
-func (c *client) recv(l *net.UDPConn, msgCh chan *msgAddr) {
+func (c *Client) recv(l *net.UDPConn, msgCh chan *msgAddr) {
+	fmt.Println("started recv")
 	if l == nil {
 		return
 	}
 	buf := make([]byte, 65536)
 	for atomic.LoadInt32(&c.closed) == 0 {
 		n, addr, err := l.ReadFromUDP(buf)
+
+		//fmt.Println("msg", n, addr, err)
 
 		if atomic.LoadInt32(&c.closed) == 1 {
 			return
