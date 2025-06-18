@@ -394,7 +394,6 @@ func (c *Client) sendQuery(q *dns.Msg) error {
 
 // recv is used to receive until we get a shutdown
 func (c *Client) recv(l *net.UDPConn, msgCh chan *msgAddr) {
-	fmt.Println("started recv")
 	if l == nil {
 		return
 	}
