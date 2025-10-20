@@ -158,13 +158,13 @@ func newClient(v4 bool, v6 bool, logger *log.Logger, inter *net.Interface) (*Cli
 
 	// Establish multicast connections
 	if v4 {
-		mconn4, err = net.ListenMulticastUDP("udp4", nil, ipv4Addr)
+		mconn4, err = net.ListenMulticastUDP("udp4", inter, ipv4Addr)
 		if err != nil {
 			logger.Printf("[ERR] mdns: Failed to bind to udp4 port: %v", err)
 		}
 	}
 	if v6 {
-		mconn6, err = net.ListenMulticastUDP("udp6", nil, ipv6Addr)
+		mconn6, err = net.ListenMulticastUDP("udp6", inter, ipv6Addr)
 		if err != nil {
 			logger.Printf("[ERR] mdns: Failed to bind to udp6 port: %v", err)
 		}
